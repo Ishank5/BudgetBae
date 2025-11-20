@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- BudgetBae Brand Colors -->
+    <color name="budgetbae_dark_green">#056153</color>
+    <color name="budgetbae_gold">#F1BB32</color>
+    <color name="budgetbae_teal">#158F7E</color>
+    
+    <!-- Legacy colors for compatibility -->
+    <color name="purple_200">#158F7E</color>
+    <color name="purple_500">#056153</color>
+    <color name="purple_700">#056153</color>
+    <color name="teal_200">#158F7E</color>
+    <color name="teal_700">#056153</color>
+    <color name="black">#FF000000</color>
+    <color name="white">#FFFFFFFF</color>
+</resources>
