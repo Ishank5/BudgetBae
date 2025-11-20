@@ -1,5 +1,9 @@
 package com.humblecoders.fintrack
 
+import android.net.Uri
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
@@ -13,6 +17,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
@@ -26,15 +31,37 @@ fun AddTransactionScreen(
     type: String, // "expense" or "income"
     onDismiss: () -> Unit,
     onTransactionAdded: () -> Unit,
-    onTransactionAddedWithCategory: (String, String) -> Unit = { _, _ -> } // type, category
+    onTransactionAddedWithCategory: (String, String) -> Unit = { _, _ -> }, // type, category
+    initialImageUri: Uri? = null // For share intent
 ) {
     var amount by remember { mutableStateOf("") }
     var selectedCategory by remember { mutableStateOf("") }
     var description by remember { mutableStateOf("") }
     var isLoading by remember { mutableStateOf(false) }
+    var isScanning by remember { mutableStateOf(false) }
     var errorMessage by remember { mutableStateOf<String?>(null) }
     
     val scope = rememberCoroutineScope()
+    val context = LocalContext.current
+    
+    // Helper functions to update state
+    val setAmount: (String) -> Unit = { amount = it }
+    val setSelectedCategory: (String) -> Unit = { selectedCategory = it }
+    val setIsScanning: (Boolean) -> Unit = { isScanning = it }
+    
+    // Image picker launcher
+    val imagePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.GetContent()
+    ) { uri: Uri? ->
+        uri?.let { processImage(it, context, scope, type, setAmount, setSelectedCategory, setIsScanning) }
+    }
+    
+    // Process initial image URI if provided (from share intent)
+    LaunchedEffect(initialImageUri) {
+        initialImageUri?.let { uri ->
+            processImage(uri, context, scope, type, setAmount, setSelectedCategory, setIsScanning)
+        }
+    }
     
     val categories = if (type == "expense") {
         listOf(
@@ -116,6 +143,36 @@ fun AddTransactionScreen(
                     unfocusedBorderColor = Color(0xFFE0E0E0)
                 )
             )
+            
+            Spacer(modifier = Modifier.height(24.dp))
+            
+            // Scan Receipt Button
+            OutlinedButton(
+                onClick = { imagePickerLauncher.launch("image/*") },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !isScanning && !isLoading,
+                colors = ButtonDefaults.outlinedButtonColors(
+                    contentColor = BudgetBaeDarkGreen
+                ),
+                shape = RoundedCornerShape(12.dp)
+            ) {
+                if (isScanning) {
+                    CircularProgressIndicator(
+                        color = BudgetBaeDarkGreen,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Scanning...")
+                } else {
+                    Icon(
+                        Icons.Default.CameraAlt,
+                        contentDescription = null,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Scan Receipt/Screenshot")
+                }
+            }
             
             Spacer(modifier = Modifier.height(24.dp))
             
@@ -284,3 +341,118 @@ data class Category(
     val name: String,
     val icon: ImageVector
 )
+
+/**
+ * Process image and extract transaction details
+ */
+private fun processImage(
+    imageUri: Uri,
+    context: android.content.Context,
+    scope: kotlinx.coroutines.CoroutineScope,
+    defaultType: String,
+    setAmount: (String) -> Unit,
+    setCategory: (String) -> Unit,
+    setIsScanning: (Boolean) -> Unit
+) {
+    setIsScanning(true)
+    
+    scope.launch {
+        try {
+            // Extract text from image
+            val textResult = ReceiptScanner.extractTextFromUri(context, imageUri)
+            
+            textResult.onSuccess { extractedText ->
+                // Log extracted text for debugging
+                android.util.Log.d("ReceiptScanner", "Extracted text: $extractedText")
+                
+                // Parse the extracted text
+                val parsed = TransactionParser.parseTransaction(extractedText)
+                
+                android.util.Log.d("ReceiptScanner", "Parsed - Amount: ${parsed.amount}, Type: ${parsed.type}, Category: ${parsed.category}")
+                
+                // Pre-fill form with parsed data
+                parsed.amount?.let { amount ->
+                    setAmount(String.format("%.2f", amount))
+                }
+                
+                // Set category if detected and it matches available categories
+                parsed.category?.let { detectedCategory ->
+                    // Map detected category to available categories
+                    val mappedCategory = mapDetectedCategory(detectedCategory, defaultType)
+                    if (mappedCategory != null) {
+                        setCategory(mappedCategory)
+                    }
+                }
+                
+                // Show toast message with type detection info
+                val toastMessage = buildString {
+                    parsed.amount?.let {
+                        append("Scanned: ₹${String.format("%.2f", it)}")
+                    }
+                    parsed.category?.let {
+                        append(" for $it")
+                    }
+                    // Warn if detected type doesn't match current screen
+                    parsed.type?.let { detectedType ->
+                        if (detectedType != defaultType) {
+                            append(" (Detected: ${detectedType.replaceFirstChar { it.uppercase() }})")
+                        }
+                    }
+                }
+                
+                if (toastMessage.isNotEmpty()) {
+                    Toast.makeText(context, toastMessage, Toast.LENGTH_LONG).show()
+                } else {
+                    // Show more helpful error message
+                    val errorMsg = if (extractedText.isBlank()) {
+                        "No text found in image. Please try a clearer screenshot."
+                    } else {
+                        "Could not extract amount/category. Extracted text: ${extractedText.take(50)}..."
+                    }
+                    Toast.makeText(context, errorMsg, Toast.LENGTH_LONG).show()
+                    android.util.Log.w("ReceiptScanner", "Failed to parse. Text: $extractedText")
+                }
+            }.onFailure { exception ->
+                Toast.makeText(
+                    context,
+                    "Failed to scan receipt: ${exception.message}",
+                    Toast.LENGTH_LONG
+                ).show()
+            }
+        } catch (e: Exception) {
+            Toast.makeText(
+                context,
+                "Error processing image: ${e.message}",
+                Toast.LENGTH_LONG
+            ).show()
+        } finally {
+            setIsScanning(false)
+        }
+    }
+}
+
+/**
+ * Map detected category to available categories in the form
+ * Only returns categories that are valid for the given transaction type
+ */
+private fun mapDetectedCategory(detectedCategory: String, type: String): String? {
+    // Expense categories
+    val expenseCategoryMap = mapOf(
+        "Food" to "Food",
+        "Transport" to "Transport",
+        "Bills" to "Bills",
+        "Entertainment" to "Entertainment",
+        "Health" to "Health",
+        "Shopping" to "Shopping",
+        "Grocery" to "Grocery"
+    )
+    
+    // Income categories (limited mapping - parser mainly detects expense categories)
+    val incomeCategoryMap = mapOf<String, String>()
+    
+    return if (type == "expense") {
+        expenseCategoryMap[detectedCategory]
+    } else {
+        incomeCategoryMap[detectedCategory]
+    }
+}
