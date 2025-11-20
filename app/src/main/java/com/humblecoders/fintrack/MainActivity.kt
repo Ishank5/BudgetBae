@@ -1,7 +1,9 @@
 package com.humblecoders.fintrack
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
+import android.net.Uri
 import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
@@ -16,8 +18,10 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.rememberNavController
 import com.google.firebase.FirebaseApp
 import com.humblecoders.fintrack.ui.theme.FinTrackTheme
+import kotlinx.coroutines.launch
 
 class MainActivity : ComponentActivity() {
+    private var sharedImageUriState = mutableStateOf<Uri?>(null)
     private val requestPermissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestPermission()
     ) { isGranted: Boolean ->
@@ -31,6 +35,9 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         FirebaseApp.initializeApp(this)
+        
+        // Handle share intent
+        handleShareIntent(intent)
         
         // Create notification channel for balance notifications
         NotificationHelper.createNotificationChannel(this)
@@ -54,14 +61,33 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             FinTrackTheme {
-                FinTrackApp()
+                FinTrackApp(sharedImageUriState = sharedImageUriState)
             }
+        }
+    }
+    
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent) // Update the intent
+        handleShareIntent(intent)
+    }
+    
+    private fun handleShareIntent(intent: Intent?) {
+        if (intent?.action == Intent.ACTION_SEND && intent.type?.startsWith("image/") == true) {
+            val imageUri = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                intent.getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java)
+            } else {
+                @Suppress("DEPRECATION")
+                intent.getParcelableExtra<Uri>(Intent.EXTRA_STREAM)
+            }
+            sharedImageUriState.value = imageUri
+            android.util.Log.d("MainActivity", "Received shared image: $imageUri")
         }
     }
 }
 
 @Composable
-fun FinTrackApp() {
+fun FinTrackApp(sharedImageUriState: MutableState<Uri?>) {
     val navController = rememberNavController()
     var refreshHome by remember { mutableStateOf(0) }
     var showSplash by remember { mutableStateOf(true) }
@@ -138,6 +164,42 @@ fun FinTrackApp() {
                 var showAddExpense by remember { mutableStateOf(false) }
                 var showAddIncome by remember { mutableStateOf(false) }
                 val context = LocalContext.current
+                var pendingImageUri by remember { mutableStateOf<Uri?>(null) }
+                
+                // Check if there's a pending shared image
+                LaunchedEffect(sharedImageUriState.value) {
+                    sharedImageUriState.value?.let { uri ->
+                        // First, scan the image to detect transaction type
+                        try {
+                            val textResult = ReceiptScanner.extractTextFromUri(context, uri)
+                            textResult.onSuccess { extractedText ->
+                                val parsed = TransactionParser.parseTransaction(extractedText)
+                                
+                                // Open the appropriate screen based on detected type
+                                pendingImageUri = uri
+                                if (parsed.type == "income") {
+                                    showAddIncome = true
+                                    android.util.Log.d("MainActivity", "Detected income, opening income screen")
+                                } else {
+                                    // Default to expense if type is null or expense
+                                    showAddExpense = true
+                                    android.util.Log.d("MainActivity", "Detected expense or unknown, opening expense screen")
+                                }
+                            }.onFailure {
+                                // If scanning fails, default to expense screen
+                                android.util.Log.w("MainActivity", "Failed to scan image: ${it.message}")
+                                pendingImageUri = uri
+                                showAddExpense = true
+                            }
+                        } catch (e: Exception) {
+                            // If scanning fails, default to expense screen
+                            android.util.Log.w("MainActivity", "Error scanning image: ${e.message}")
+                            pendingImageUri = uri
+                            showAddExpense = true
+                        }
+                        sharedImageUriState.value = null // Clear after using
+                    }
+                }
 
                 HomeScreen(
                 onAddExpenseClick = { showAddExpense = true },
@@ -160,26 +222,34 @@ fun FinTrackApp() {
             if (showAddExpense) {
                 AddTransactionScreen(
                     type = "expense",
-                    onDismiss = { showAddExpense = false },
+                    onDismiss = { 
+                        showAddExpense = false
+                        pendingImageUri = null // Clear any pending image
+                    },
                     onTransactionAdded = {
                         refreshHome++
                     },
                     onTransactionAddedWithCategory = { type, category ->
                         ToastHelper.showTransactionToast(context, type, category)
-                    }
+                    },
+                    initialImageUri = pendingImageUri
                     )
                 }
 
                 if (showAddIncome) {
                     AddTransactionScreen(
                     type = "income",
-                    onDismiss = { showAddIncome = false },
+                    onDismiss = { 
+                        showAddIncome = false
+                        pendingImageUri = null // Clear any pending image
+                    },
                     onTransactionAdded = {
                         refreshHome++
                     },
                     onTransactionAddedWithCategory = { type, category ->
                         ToastHelper.showTransactionToast(context, type, category)
-                    }
+                    },
+                    initialImageUri = pendingImageUri
                     )
                 }
             }
